@@ -1,2 +1,2 @@
 # create-your-own-javascript-runtime
-Journal of my research of nodejs.
+Notes of my research of nodejs.
