@@ -1,6 +1,6 @@
-/part2_build-dependencies/demo/v8/
+/part2_build-dependencies/demo/v8/*
 !/part2_build-dependencies/demo/v8/.gitkeep
-/part2_build-dependencies/demo/libuv/
+/part2_build-dependencies/demo/libuv/*
 !/part2_build-dependencies/demo/libuv/.gitkeep
 
 .DS_Store
