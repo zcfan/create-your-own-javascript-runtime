@@ -1,10 +1,10 @@
 # 定制 javascript runtime - Part 2：构建依赖
 
-## 1 准备依赖
-
 这一 part 我们从源码构建一下 v8 和 libuv 两个依赖项，算是上一 part 知识的实战演练。
 
-### 1.1 编译 v8
+> 注意：作者不是 c/c++ 开发者，构建命令、范例代码都是边查边写，主打不求甚解。**绝对**不要信赖本文中的任何命令、代码，对参考本文内容导致的任何损失不负责任。
+
+## 1 编译 v8
 
 ```bash
 cd demo
@@ -210,7 +210,7 @@ int main(int argc, char* argv[]) {
 - `process.cc`：演示如何实现一个可以用 js 扩展的 http 请求处理程序，js 可以提供一个 Process 函数来扩展 http 请求处理程序的功能，比如可以统计每个页面的被访问次数等。
 - `shell.cc`：接收文件名作为参数，读取并执行这些文件的内容。还有命令提示符，可以输入 js 代码片段并执行。同时给 js 提供了一个名为 `print` 的函数
 
-### 1.2 libuv
+## 2 编译 libuv
 
 ```bash
 # 下载 libuv 源码
@@ -222,18 +222,293 @@ mkdir -p build
 (cd build && cmake ..)
 cmake --build build
 
-# 验证构建是否成功
+# 运行测试验证构建是否成功
 build/uv_run_tests_a
 ```
 
 构建完成后，`build/libuv.a` 即为 libuv 的静态库。同目录还有一个 `libuv.1.0.0.dylib` 这是动态库，我们后面使用静态库就好。
 
+## 3 扩展 v8/samples/shell.cc
 
+我们后面的例子在 shell.cc 这个范例的基础上扩展，现在先体验一下这个范例：
 
+```bash
+g++ -I. -Iinclude samples/shell.cc -o shell -fno-rtti -lv8_monolith -lv8_libbase -lv8_libplatform -ldl -Lout.gn/x64.release.sample/obj/ -pthread -std=c++17 -DV8_COMPRESS_POINTERS -DV8_ENABLE_SANDBOX
 
+./shell
+V8 version 11.9.169.7 [sample shell]
+> 1 + 1
+2
+> 'hello'
+hello
+> print('123')
+123
+> print('123',123,'abc')
+123 123 abc
+> load('loadme.js')
+# loadme.js 需要把 demo/v8-sample/loadme.js 复制到 demo/v8 中
+load and executed! 2
+```
 
-## 参考/翻译
+无论 `print` 还是 `load` 函数，都是常规的 javascript runtime 中没有的：
 
-https://github.com/ErickWendel/myownnode
+```bash
+$ node
+Welcome to Node.js v18.1.0.
+Type ".help" for more information.
+> print
+Uncaught ReferenceError: print is not defined
+> load
+Uncaught ReferenceError: load is not defined
+```
 
-https://v8.dev/docs/source-code#using-git
+因为它们是在 `samples/shell.cc` 中自定义的暴露给 js 环境的函数。所以现在这个名为 `shell` 的可执行文件完全可以算是我们自己定制的 javascript runtime 了。
+
+`shell.cc` 的 `main` 结构和前面看过的 `hello_world.cc` 很像:
+
+```c++
+int main(int argc, char* argv[]) {
+  //==========
+  // 初始化
+  //==========
+
+  v8::V8::InitializeICUDefaultLocation(argv[0]);
+  v8::V8::InitializeExternalStartupData(argv[0]);
+  std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform();
+  v8::V8::InitializePlatform(platform.get());
+  v8::V8::SetFlagsFromCommandLine(&argc, argv, true);
+  v8::V8::Initialize();
+  v8::Isolate::CreateParams create_params;
+  create_params.array_buffer_allocator =
+      v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+  v8::Isolate* isolate = v8::Isolate::New(create_params);
+
+  //==========
+  // 主体逻辑
+  //==========
+
+  // 如果调用 shell 时指定了参数，比如 `shell loadme.js`，则 argc == 2（因为第一个参数是可执行文件的名字 shell）
+  // 这种情况下行为是执行参数指定的 javascript 脚本
+  // 如果没有指定参数，直接执行 `shell`，则 argc == 1，run_shell 为 true，
+  // 这种情况下行为是打开一个可交互的 shell
+  run_shell = (argc == 1);
+  int result;
+  {
+    v8::Isolate::Scope isolate_scope(isolate);
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = CreateShellContext(isolate);
+    if (context.IsEmpty()) {
+      fprintf(stderr, "Error creating context\n");
+      return 1;
+    }
+    v8::Context::Scope context_scope(context);
+    // run_shell == false 的分支（argc == 1，RunMain 内部会直接 return）
+    result = RunMain(isolate, platform.get(), argc, argv);
+    // run_shell == true 的分支
+    if (run_shell) RunShell(context, platform.get());
+  }
+
+  //==========
+  // 销毁
+  //==========
+
+  isolate->Dispose();
+  v8::V8::Dispose();
+  v8::V8::DisposePlatform();
+  delete create_params.array_buffer_allocator;
+  return result;
+}
+```
+
+前面用到的 `print` `load` 这些函数是在 `CreateShellContext` 中配置的：
+
+```c++
+// Creates a new execution environment containing the built-in
+// functions.
+v8::Local<v8::Context> CreateShellContext(v8::Isolate* isolate) {
+  // 在我们的 javascript runtime 中创建一个 object
+  v8::Local<v8::ObjectTemplate> global = v8::ObjectTemplate::New(isolate);
+  // 绑定下面的 Print 函数到这个 object 的 print 字段
+  global->Set(isolate, "print", v8::FunctionTemplate::New(isolate, Print));
+  global->Set(isolate, "read", v8::FunctionTemplate::New(isolate, Read));
+  global->Set(isolate, "load", v8::FunctionTemplate::New(isolate, Load));
+  global->Set(isolate, "quit", v8::FunctionTemplate::New(isolate, Quit));
+  global->Set(isolate, "version", v8::FunctionTemplate::New(isolate, Version));
+  // 创建 Context，将前面创建的 object 传入第三个参数（global_template）
+  // 它的字段（print, read, load ...）就会暴露在 javascript 的 global 中。
+  return v8::Context::New(isolate, NULL, global);
+}
+
+// The callback that is invoked by v8 whenever the JavaScript 'print'
+// function is called.  Prints its arguments on stdout separated by
+// spaces and ending with a newline.
+void Print(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  bool first = true;
+  for (int i = 0; i < info.Length(); i++) {
+    v8::HandleScope handle_scope(info.GetIsolate());
+    if (first) {
+      first = false;
+    } else {
+      printf(" ");
+    }
+    v8::String::Utf8Value str(info.GetIsolate(), info[i]);
+    const char* cstr = ToCString(str);
+    printf("%s", cstr);
+  }
+  printf("\n");
+  fflush(stdout);
+}
+```
+
+下一步我们的目标就是在这个范例的基础上扩展我们熟悉的 `setTimeout` 函数，在我们这个*极简* runtime 中 `setTimeout` 也不存在：
+
+```bash
+> setTimeout
+(shell):1: ReferenceError: setTimeout is not defined
+setTimeout
+^
+ReferenceError: setTimeout is not defined
+    at (shell):1:1
+```
+
+编辑 `shell.cc`，或者直接使用 `demo/v8-sample/shell.cc`：
+
+```c++
+// line 43: include libuv 的头文件
+#include "uv.h"
+
+// line 45: 定义 timer 结构体，用于实现 Timeout
+struct timer 
+{
+    uv_timer_t uvTimer;
+    v8::Isolate *isolate;
+    v8::Global<v8::Function> callback;
+};
+
+// line 51: 初始化 libuv 的 timer
+uv_loop_t *loop = uv_default_loop();
+
+// line 73: 声明 Timeout 和 onTimerCallback 两个函数
+// Timeout 是要暴露到 js global 的函数
+// onTimerCallback 是 libuv timer 时间到了之后调用的 callback
+void Timeout(const v8::FunctionCallbackInfo<v8::Value>& info);
+void onTimerCallback(uv_timer_t *handle);
+
+// line 121: 在 CreateShellContext 中向 global 注册 setTimeout
+v8::Local<v8::Context> CreateShellContext(v8::Isolate* isolate) {
+  // ...
+
+  global->Set(isolate, "print", v8::FunctionTemplate::New(isolate, Print));
+  global->Set(isolate, "read", v8::FunctionTemplate::New(isolate, Read));
+  global->Set(isolate, "load", v8::FunctionTemplate::New(isolate, Load));
+  global->Set(isolate, "quit", v8::FunctionTemplate::New(isolate, Quit));
+  global->Set(isolate, "version", v8::FunctionTemplate::New(isolate, Version));
+  // 增加这一行
+  global->Set(isolate, "setTimeout", v8::FunctionTemplate::New(isolate, Timeout));
+
+  // ...
+}
+
+// line 225: 实现 Timeout 函数
+void Timeout(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  // libuv 的概念
+  uv_loop_t *loop = uv_default_loop();
+  auto isolate = info.GetIsolate();
+  auto context = isolate->GetCurrentContext();
+  // 获得 setTimeout 第一个参数
+  v8::Local<v8::Value> callback = info[0];
+  // 获得 setTimeout 第二个参数
+  int64_t sleep = info[1]->IntegerValue(context).ToChecked();
+
+  // 确保第一个参数是个函数
+  if(!callback->IsFunction()) 
+  {
+    printf("callback not declared!");
+    return;
+  }
+
+  // 初始化 timer 结构体
+  timer *timerWrap = new timer();
+  timerWrap->callback.Reset(isolate, callback.As<v8::Function>());
+  timerWrap->uvTimer.data = (void *)timerWrap;
+  timerWrap->isolate = isolate;
+
+  // 设置 libuv timer
+  uv_timer_init(loop, &timerWrap->uvTimer);
+  uv_timer_start(&timerWrap->uvTimer, onTimerCallback, sleep, 0);
+  uv_run(loop, UV_RUN_DEFAULT);
+}
+
+// line 254: 实现 onTimerCallback
+void onTimerCallback(uv_timer_t *handle) {
+  // 获取 timer 结构体
+  timer *timerWrap = (timer *)handle->data;
+  v8::Isolate *isolate = timerWrap->isolate;
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+  if(isolate->IsDead()) {
+    printf("isolate is dead");
+    return;
+  }
+
+  v8::Local<v8::Function> callback = v8::Local<v8::Function>::New(
+    isolate,
+    timerWrap->callback
+  );
+  v8::Local<v8::Value> result;
+  v8::Handle<v8::Value> resultr [] = {};
+
+  // 调用 callback
+  if(callback->Call(
+    context,
+    context->Global(),
+    0,
+    resultr).ToLocal(&result)
+  ) {
+    // OK, the callback succeeded
+  } else {
+    // some exception happened
+  }
+}
+```
+
+构建命令要对应修改一下，把 `libuv.a` 连接进来：
+
+```bash
+g++ -I. -Iinclude -I../libuv/include samples/shell.cc ../libuv/build/libuv.a -o shell -fno-rtti -lv8_monolith -lv8_libbase -lv8_libplatform -ldl -Lout.gn/x64.release.sample/obj/ -pthread -std=c++17 -DV8_COMPRESS_POINTERS -DV8_ENABLE_SANDBOX
+# 增加了这两段
+# -I../libuv/include
+# ../libuv/build/libuv.a
+```
+
+构建完成，体验一下我们全新的 `setTimeout`：
+
+```bash
+$ ./shell
+V8 version 11.9.169.7 [sample shell]
+> setTimeout(() => { print(123) }, 1000)
+123
+```
+
+## 4 总结
+
+这一 part 中我们从源码构建了 v8 和 libuv 的静态库，并在 `v8/samples/shell.cc` 的基础上扩展了 `setTimeout` api。尽管非常简单粗暴，bug 满天飞，但我们的确定制了一个独一无二的 javascript runtime。
+
+后面我们再尝试在这个基础上去扩展一些更加有趣的特性。
+
+## 5 扩展阅读
+
+我们已经多次遇到了 Isolate、Context、loop 这些 v8、libuv 的概念，但我这里并不打算展开，我们现阶段只要知道怎么照搬，并且对它们的作用有个大概感受即可。
+
+有精力想深入了解的可以阅读这篇文档：
+
+https://chromium.googlesource.com/chromium/src/+/master/third_party/blink/renderer/bindings/core/v8/V8BindingDesign.md
+
+这里还有一篇 cloudflare 如何使用 v8 Isolate 实现 Cloudflare Worker 产品的文章，性能相对于之前的 serverless 方案有大幅提升：
+
+https://blog.cloudflare.com/serverless-performance-comparison-workers-lambda/
+
+## 6 参考/翻译
+
+- https://github.com/ErickWendel/myownnode
+- https://v8.dev/docs/source-code#using-git
+- https://chromium.googlesource.com/chromium/src/+/master/third_party/blink/renderer/bindings/core/v8/V8BindingDesign.md
