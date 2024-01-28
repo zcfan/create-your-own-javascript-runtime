@@ -1,16 +1,16 @@
-# 定制 javascript runtime - Part 3：minigame 1
+# 定制 javascript runtime - Part 3：shadertoy 1
 
-前面我们在 shell demo 的基础上实现了 `setTimeout`，由于这个项目的玩票性质，接下来我想扩展的不再是 nodejs/deno 中常见的能力。minigame 这几章中我将尝试将 glfw 集成进我们的 runtime，让我们的 runtime “原生”支持 opengl 绘制。🐶
+前面我们在 shell demo 的基础上实现了 `setTimeout`，由于这个项目的玩票性质，接下来我想扩展的不再是 nodejs/deno 中常见的能力。这几章中我将尝试将 glfw 集成进我们的 runtime，让我们的 runtime 支持 opengl 绘制。
 
-另外为了简化，我可能会放弃微信小游戏那样实现 canvas api，而是自己瞎搞一个能用就行的。毕竟笔者业余也没时间系统复习 c，交流思路为主就好。
+说 shadertoy 国内读者可能会不太了解，但说微信小游戏应该都知道。我们这里的目标有些类似，我们是简化到只有 fragment shader，对比微信小游戏也就是少了 canvas api、音频、触摸等系统事件、文件系统、网络、微信开放能力……而已。差不多啦🐶
 
-本章我们主要从 glfw 的[官方 tutorial](https://www.glfw.org/docs/latest/quick.html) 运行一个范例程序，搭建一个简单的类似 [shadertoy](https://www.shadertoy.com/) 的架子。
+本章我们主要从 glfw 的[官方 tutorial](https://www.glfw.org/docs/latest/quick.html) 运行一个范例程序，搭建一个简单的类似 [shadertoy](https://www.shadertoy.com/) 的架子。然后 glfw 是针对桌面系统的，而非移动设备。所以不用担心我只是拿小游戏举个例子，我们（目前）不涉及移动开发。
 
 后续我们会将这个自制 shadertoy 集成进我们 part2 中实现的 runtime 中，允许从 javascript 运行部份 shadertoy 的案例。
 
 ## 1 体验 glfw
 
-这次我们不再从 glfw 源码构建，而是简单点用 homebrew 安装：
+这次我们不再从源码构建 glfw，而是简单点用 homebrew 安装：
 
 ```bash
 brew install glfw
@@ -36,9 +36,7 @@ gcc -o demo1 demo1.c gles2.c -lglfw -framework Cocoa -framework OpenGL -framewor
 
 ## 2 实现类似 shadertoy 的框架
 
-为避免误会还是提一下，shadertoy 里的案例全是 fragment shader，只用到了 webgl 的一部份能力。
-
-属于是带着镣铐跳舞，像是一种限制条件的挑战赛，能用有限的手段实现非常炫酷的效果自然很酷，但其实很多案例并不具备实用性。
+为避免误会还是提一下，shadertoy 里的案例全是 fragment shader，只用到了 webgl 的一部份能力。属于是带着镣铐跳舞，像是一种限制条件的挑战赛，能用有限的手段实现非常炫酷的效果自然很牛逼，但其实很多案例并不具备实用性。
 
 但这个前提对我们来说就非常合适，因为我们就是希望尽可能简化我们的 runtime 但同时又希望功能完成度不要太低。shadertoy 的限制条件完美符合我们需求🎉。
 
